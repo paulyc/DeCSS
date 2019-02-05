@@ -13,6 +13,7 @@
 #endif
 #include<sys/ioctl.h>
 #include<errno.h>
+#include<string.h>
 
 static int fd;
 

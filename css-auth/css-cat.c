@@ -2,6 +2,7 @@
  * css-cat.c
  *
  * Copyright 1999 Derek Fawcus.
+ * Copyright (C) 2019 Paul Ciarlo <paul.ciarlo@gmail.com>
  *
  * Released under version 2 of the GPL.
  *
@@ -18,6 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #include "css-descramble.h"
 
@@ -60,6 +62,41 @@ int verbose = 0;
 int keep_pack = 0;
 int keep_pes = -1;
 
+static ssize_t read_sector(int fdi) {
+    ssize_t rd = 0;
+    off_t sector_offset = lseek(fdi, 0, SEEK_CUR);
+    int retries = 0;
+
+    do {
+        ssize_t ret = read(fdi, sector + rd, sizeof(sector) - rd);
+        if (ret > 0) {
+            rd += ret;
+        } else if (ret == 0) {
+            fprintf(stderr, "EOF!\n");
+            return 0;
+        } else if (ret == -1) {
+            if (errno == EIO) {
+                if (retries++ < 10) {
+                    fprintf(stderr, "Got I/O error (bad sector read?) on sector %d retrying %d times...\n", sectors, retries);
+                    lseek(fdi, sector_offset, SEEK_SET);
+                } else {
+                    fprintf(stderr, "Giving up on sector %d after retrying %d times...\n", sectors, retries);
+                    lseek(fdi, sector_offset + sizeof(sector), SEEK_SET);
+                    memset(sector, '\0', sizeof(sector));
+                    return sizeof(sector);
+                }
+            } else {
+                fprintf(stderr, "Aborting after errno %d: %s\n", errno, strerror(errno));
+                return -1;
+            }
+        } else {
+            __asm("int $3");
+        }
+    } while (rd < sizeof(sector));
+
+    return rd;
+}
+
 #define STCODE(p,a,b,c,d) ((p)[0] == a && (p)[1] == b && (p)[2] == c && (p)[3] == d)
 
 static void un_css(int fdi, int fdo)
@@ -67,7 +104,7 @@ static void un_css(int fdi, int fdo)
 	unsigned char *sp, *pes;
 	int writen, wr, peslen, hdrlen;
 
-	while (read(fdi, sector, 2048) == 2048) {
+	while (read_sector(fdi) > 0) {
 		++sectors;
 		if (!STCODE(sector,0x00,0x00,0x01,0xba)) {
 			fputs("Not Pack start code\n", stderr);
