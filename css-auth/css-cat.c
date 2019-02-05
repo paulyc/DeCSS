@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #if defined(__linux__)
 # include <getopt.h>
+# include <sys/ioctl.h>
+# include <linux/fd.h>
 #endif /* __linux__ */
 #include <string.h>
 #include <unistd.h>
@@ -62,49 +64,50 @@ int verbose = 0;
 int keep_pack = 0;
 int keep_pes = -1;
 
-static ssize_t read_sector(int fdi) {
+static ssize_t read_sector(FILE *f) {
     ssize_t rd = 0;
-    off_t sector_offset = lseek(fdi, 0, SEEK_CUR);
+    off_t sector_offset = fseek(f, 0, SEEK_CUR);
     int retries = 0;
 
-    do {
-        ssize_t ret = read(fdi, sector + rd, sizeof(sector) - rd);
-        if (ret > 0) {
-            rd += ret;
+    for (;;) {
+        ssize_t ret = fread(sector, 1, sizeof(sector), f);
+
+        if (ret == sizeof(sector)) {
+            return ret;
         } else if (ret == 0) {
             fprintf(stderr, "EOF!\n");
             return 0;
         } else if (ret == -1) {
             if (errno == EIO) {
+                clearerr(f);
                 if (retries++ < 10) {
                     fprintf(stderr, "Got I/O error (bad sector read?) on sector %d retrying %d times...\n", sectors, retries);
-                    lseek(fdi, sector_offset, SEEK_SET);
+                    fseek(f, sector_offset, SEEK_SET);
                 } else {
                     fprintf(stderr, "Giving up on sector %d after retrying %d times...\n", sectors, retries);
-                    lseek(fdi, sector_offset + sizeof(sector), SEEK_SET);
-                    memset(sector, '\0', sizeof(sector));
-                    return sizeof(sector);
+                    fseek(f, sector_offset + sizeof(sector), SEEK_SET);
+                    sector[0] = 0xff;
+                    return 1;
                 }
             } else {
                 fprintf(stderr, "Aborting after errno %d: %s\n", errno, strerror(errno));
                 return -1;
             }
         } else {
-            __asm("int $3");
+            fprintf(stderr, "got something weird from fread: %d\n", ret);
+            return -1;
         }
-    } while (rd < sizeof(sector));
-
-    return rd;
+    }
 }
 
 #define STCODE(p,a,b,c,d) ((p)[0] == a && (p)[1] == b && (p)[2] == c && (p)[3] == d)
 
-static void un_css(int fdi, int fdo)
+static void un_css(FILE *f, int fdo)
 {
 	unsigned char *sp, *pes;
 	int writen, wr, peslen, hdrlen;
 
-	while (read_sector(fdi) > 0) {
+	while (read_sector(f) > 0) {
 		++sectors;
 		if (!STCODE(sector,0x00,0x00,0x01,0xba)) {
 			fputs("Not Pack start code\n", stderr);
@@ -162,6 +165,7 @@ static void un_css(int fdi, int fdo)
 			writen += wr;
 		} while (wr > 0 && writen < peslen);
 	}
+	fclose(f);
 }
 
 static void usage_exit(void)
@@ -221,6 +225,7 @@ int main(int ac, char **av)
 {
 	int ai, fd;
 	char titlef[12];
+	FILE *f = NULL;
 
 	if ((fd = open("disk-key", O_RDONLY)) == -1) {
 		perror("can't open disk-key");
@@ -252,8 +257,8 @@ int main(int ac, char **av)
 	close(fd);
 
 	if (strcmp(av[ai], "-") == 0)
-		fd = 0;
-	else if ((fd = open(av[ai], O_RDONLY)) == -1) {
+		f = fdopen(0, "rb");
+	else if ((f = fopen(av[ai], "rb")) == NULL) {
 		fputs("can't open VOB file ", stderr);
 		fputs(av[ai], stderr);
 		perror("");
@@ -261,16 +266,16 @@ int main(int ac, char **av)
 	}
 
 	if (!css_decrypttitlekey(title_key, disk_key, playkeys)) {
-		close(fd);
+		fclose(f);
 		return 3;
 	}
 
-	un_css(fd, 1);
+	un_css(f, 1);
 
 	fprintf(stderr, "Total %lu, skipped %lu,  crvid %lu\n",
 		sectors, skipped, crypted);
 
-	close(fd);
+	fclose(f);
 
 	return 0;
 }
